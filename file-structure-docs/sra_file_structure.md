@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Sequence Read Archive (SRA) format is a specialized file format developed by NCBI for storing next-generation sequencing data. SRA files are built upon the Virtual Database (VDB) architecture, which provides a columnar storage system optimized for genomic sequence data. The format supports two variants: **SRA Normalized** (full format) and **SRA Lite** (compressed format with simplified quality scores).
+The Sequence Read Archive (SRA) format is a KAR archive containing a VDB (Virtual/Vertical Database) with a specific directory tree structure optimized for genomic sequence data storage. The VDB architecture provides a columnar storage system that organizes data vertically by columns rather than horizontally by rows, enabling efficient analytical queries and superior compression ratios for biological data. The format supports two variants: **SRA Normalized** (full format) and **SRA Lite** (compressed format with simplified quality scores).
 
 **Related Documentation:**
 - [KAR File Format Specification](kar_file_structure.md) - The underlying archive format
