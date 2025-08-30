@@ -163,6 +163,187 @@ struct SerializedTOCEntry {
 };
 ```
 
+### Concrete Binary Format Example
+
+**Example: Simple KAR file with 2 files**
+
+This example shows the exact byte layout for a minimal KAR archive containing two files:
+
+```
+File Structure:
+├── hello.txt (5 bytes: "Hello")
+└── world.txt (5 bytes: "World")
+
+Complete Binary Layout:
+```
+
+**Header Section [bytes 0-31]:**
+```
+00000000: 4E434249 2E737261 05031988 00000001  NCBI.sra........
+00000010: 00000000 00000070                    .......p........
+```
+
+- `4E434249`: "NCBI" magic signature
+- `2E737261`: ".sra" format identifier  
+- `05031988`: Normal byte order tag
+- `00000001`: Version 1
+- `0000000000000070`: File data starts at offset 112 (0x70)
+
+**TOC Section [bytes 32-111]:**
+```
+00000020: 0009 6865 6C6C 6F2E 7478 7400 0000 0000  ..hello.txt.....
+00000030: 0000 0000 0000 01A4 03 00000000 00000070  ...........p....
+00000040: 0000 0000 0000 0005 0009 776F 726C 642E  ..........world.
+00000050: 7478 7400 0000 0000 0000 0000 0000 01A4  txt.............
+00000060: 03 00000000 00000075 0000 0000 0000 0005  .......u........
+00000070: 48656C6C 6F000000 576F726C 64000000  Hello...World...
+```
+
+**TOC Entry 1 (hello.txt):**
+- `0009`: name_len = 9
+- `68656C6C6F2E747874`: "hello.txt" (9 bytes)
+- `0000000000000000`: mod_time = 0 (Unix epoch)
+- `000001A4`: access_mode = 0644 octal = 420 decimal = 0x1A4
+- `03`: type_code = ktocentrytype_file (3)
+- `0000000000000070`: byte_offset = 112 (where file data starts)
+- `0000000000000005`: byte_size = 5 bytes
+
+**TOC Entry 2 (world.txt):**
+- `0009`: name_len = 9  
+- `776F726C642E747874`: "world.txt" (9 bytes)
+- `0000000000000000`: mod_time = 0 (Unix epoch)
+- `000001A4`: access_mode = 0644 octal = 420 decimal = 0x1A4
+- `03`: type_code = ktocentrytype_file (3)
+- `0000000000000075`: byte_offset = 117 (after first file + alignment)
+- `0000000000000005`: byte_size = 5 bytes
+
+**File Data Section [bytes 112+]:**
+```
+00000070: 48656C6C 6F000000 576F726C 64000000  Hello...World...
+```
+
+- Bytes 112-116: "Hello" (5 bytes)
+- Bytes 117-119: Zero padding for 4-byte alignment  
+- Bytes 120-124: "World" (5 bytes)
+- Bytes 125-127: Zero padding for 4-byte alignment
+
+### BSTree Navigation for TOC Access
+
+The TOC is organized as a persistent binary search tree. Here's how to traverse it programmatically:
+
+```c
+// Example: Finding a file in the TOC
+int find_file_in_toc(uint8_t* toc_data, const char* filename) {
+    uint8_t* current = toc_data;
+    
+    while (current != NULL) {
+        // Read entry header
+        uint16_t name_len = read_uint16_le(current);
+        current += 2;
+        
+        char* entry_name = (char*)current;
+        current += name_len;
+        
+        // Compare names
+        int cmp = strncmp(filename, entry_name, name_len);
+        
+        if (cmp == 0) {
+            // Found! Read file details
+            uint64_t mod_time = read_uint64_le(current);
+            current += 8;
+            uint32_t access_mode = read_uint32_le(current);
+            current += 4;
+            uint8_t type_code = *current++;
+            
+            if (type_code == ktocentrytype_file) {
+                uint64_t byte_offset = read_uint64_le(current);
+                uint64_t byte_size = read_uint64_le(current + 8);
+                return (int)byte_offset; // Return file offset
+            }
+        } else if (cmp < 0) {
+            // Search left subtree (implementation specific)
+            current = get_left_child(current);
+        } else {
+            // Search right subtree (implementation specific)
+            current = get_right_child(current);
+        }
+    }
+    
+    return -1; // Not found
+}
+```
+
+### TOC Parsing Algorithm
+
+**Complete TOC parsing with error checking:**
+
+```c
+typedef struct TOCEntry {
+    char* name;
+    uint64_t mod_time;
+    uint32_t access_mode;
+    uint8_t type_code;
+    uint64_t file_offset;
+    uint64_t file_size;
+} TOCEntry;
+
+int parse_toc_entries(uint8_t* toc_data, size_t toc_size, TOCEntry** entries, int* count) {
+    uint8_t* current = toc_data;
+    uint8_t* toc_end = toc_data + toc_size;
+    *count = 0;
+    
+    // First pass: count entries
+    while (current < toc_end) {
+        if (current + 2 > toc_end) return -1; // Buffer overrun
+        
+        uint16_t name_len = read_uint16_le(current);
+        if (name_len == 0 || current + 2 + name_len > toc_end) return -1;
+        
+        current += 2 + name_len + 8 + 4 + 1; // Skip name, mod_time, access_mode, type
+        
+        if (current > toc_end) return -1; // Buffer overrun
+        
+        uint8_t type = current[-1]; // Get type from previous byte
+        if (type == ktocentrytype_file || type == ktocentrytype_chunked) {
+            current += 16; // Skip file offset and size
+        } else if (type == ktocentrytype_softlink) {
+            if (current + 2 > toc_end) return -1;
+            uint16_t link_len = read_uint16_le(current);
+            current += 2 + link_len;
+        }
+        
+        (*count)++;
+    }
+    
+    // Second pass: extract entries
+    *entries = calloc(*count, sizeof(TOCEntry));
+    current = toc_data;
+    
+    for (int i = 0; i < *count; i++) {
+        uint16_t name_len = read_uint16_le(current);
+        current += 2;
+        
+        (*entries)[i].name = strndup((char*)current, name_len);
+        current += name_len;
+        
+        (*entries)[i].mod_time = read_uint64_le(current);
+        current += 8;
+        (*entries)[i].access_mode = read_uint32_le(current);
+        current += 4;
+        (*entries)[i].type_code = *current++;
+        
+        if ((*entries)[i].type_code == ktocentrytype_file) {
+            (*entries)[i].file_offset = read_uint64_le(current);
+            current += 8;
+            (*entries)[i].file_size = read_uint64_le(current);
+            current += 8;
+        }
+    }
+    
+    return 0; // Success
+}
+```
+
 ### TOC Tree Organization
 
 The TOC is organized as a **Persistent Binary Search Tree (PBSTree)** that provides:
