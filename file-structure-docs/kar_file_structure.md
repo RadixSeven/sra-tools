@@ -129,52 +129,169 @@ typedef struct KARAlias {
 } KARAlias;
 ```
 
-### Binary TOC Serialization
+### Binary TOC Serialization - PBSTree Format
 
-Each entry in the TOC is serialized in binary format as follows:
+The TOC is serialized as a **Persistent Binary Search Tree (PBSTree)** immediately after the SRA header:
+
+#### PBSTree Header Format
 
 ```c
-struct SerializedTOCEntry {
-    uint16_t name_len;       // Length of entry name
+struct PBSTreeHeader {
+    uint32_t num_nodes;      // Number of nodes in the tree
+    uint32_t data_size;      // Total size of entry data that follows
+    // Variable-size data index follows (based on data_size):
+    // If data_size <= 256:    uint8_t  offsets[num_nodes];
+    // If data_size <= 65536:  uint16_t offsets[num_nodes];
+    // If data_size > 65536:   uint32_t offsets[num_nodes];
+};
+// Followed by: uint8_t entry_data[data_size];
+```
+
+#### Individual TOC Entry Format
+
+Each entry in the data section follows this format:
+
+```c
+struct TOCEntry {
+    uint16_t name_len;       // Length of entry name  
     char name[name_len];     // Entry name (not null-terminated)
-    uint64_t mod_time;       // Modification timestamp (64-bit)
-    uint32_t access_mode;    // Unix permissions (32-bit)
-    uint8_t type_code;       // Entry type code
+    int64_t mtime;          // Unix timestamp (signed 64-bit)
+    uint32_t access_mode;    // Unix permissions
+    uint8_t type_code;       // Entry type from KTocEntryType enum
     
     // Type-specific data follows:
     
-    // For files (ktocentrytype_file):
-    uint64_t byte_offset;    // Offset to file data
-    uint64_t byte_size;      // Size of file data
+    // Directory (type_code = 2):
+    // Nested PBSTree with child entries follows
     
-    // For directories (ktocentrytype_dir):
-    // Child entries follow recursively
+    // File (type_code = 3):
+    uint64_t archive_offset; // Offset in archive file
+    uint64_t file_size;      // Size of file data
     
-    // For symbolic links (ktocentrytype_softlink):
+    // Chunked File (type_code = 4):  
+    uint64_t file_size;      // Virtual file size
+    uint32_t num_chunks;     // Number of chunks
+    // For each chunk:
+    struct {
+        uint64_t logical_pos;    // Position in virtual file
+        uint64_t source_pos;     // Position in archive
+        uint64_t chunk_size;     // Size of this chunk
+    } chunks[num_chunks];
+    
+    // Soft Link (type_code = 5):
     uint16_t link_len;       // Length of link target
     char link[link_len];     // Link target path
     
-    // For empty files (ktocentrytype_emptyfile):
-    // No additional data needed
+    // Hard Link (type_code = 6):
+    uint16_t target_len;     // Length of target name
+    char target[target_len]; // Target entry name
     
-    // For chunked files (ktocentrytype_chunked):
-    uint32_t num_chunks;     // Number of chunks
-    // Array of chunk descriptors follows
+    // Empty File (type_code = 7):
+    // No additional data
 };
 ```
 
-### Concrete Binary Format Example
+#### Entry Type Constants
 
-**Example: Simple KAR file with 2 files**
+```c
+typedef enum KTocEntryType {
+    ktocentrytype_unknown    = -1,
+    ktocentrytype_notfound   = 0,
+    ktocentrytype_dir        = 2,    // Directory
+    ktocentrytype_file       = 3,    // Regular file  
+    ktocentrytype_chunked    = 4,    // Chunked file
+    ktocentrytype_softlink   = 5,    // Symbolic link
+    ktocentrytype_hardlink   = 6,    // Hard link
+    ktocentrytype_emptyfile  = 7     // Zero-byte file
+} KTocEntryType;
+```
 
-This example shows the exact byte layout for a minimal KAR archive containing two files:
+### Concrete PBSTree Binary Format Example
+
+**Example 1: Simple Test Case (Minimal KAR Archive)**
+
+This example demonstrates the KAR format with a minimal test case using two small text files:
+
+```console
+$ echo -n 11 > 1.txt
+$ echo -n 22 > 2.txt
+$ mkdir 1+2
+$ mv 1.txt 2.txt 1+2/
+$ kar --create 1-and-2.kar --directory 1+2/
+$ hexdump -c 1-and-2.kar
+```
+
+**Directory Structure:**
+```
+1+2/
+├── 1.txt (contains "11")
+└── 2.txt (contains "22")
+```
+
+**Complete Binary Layout:**
+```
+0000000   N   C   B   I   .   s   r   a 210 031 003 005 001  \0  \0  \0
+0000010   l  \0  \0  \0  \0  \0  \0  \0 002  \0  \0  \0   H  \0  \0  \0
+0000020  \0   $ 005  \0   1   .   t   x   t   o   1 263   h  \0  \0  \0
+0000030  \0 200 001  \0  \0 002  \0  \0  \0  \0  \0  \0  \0  \0 002  \0
+0000040  \0  \0  \0  \0  \0  \0 005  \0   2   .   t   x   t   u   1 263
+0000050   h  \0  \0  \0  \0 200 001  \0  \0 002 004  \0  \0  \0  \0  \0
+0000060  \0  \0 002  \0  \0  \0  \0  \0  \0  \0  \0  \0   1   1   0   0
+0000070   2   2
+```
+
+**Header Section [bytes 0-31]:**
+- `4E434249 2E737261`: "NCBI.sra" magic signature
+- `05031988`: Normal byte order (0x05031988)  
+- `00000001`: Version 1
+- `000000000000006C`: File data starts at offset 108 (0x6C)
+
+**PBSTree TOC Section [bytes 32-107]:**
+- `00000002`: num_nodes = 2 entries
+- `00000048`: data_size = 72 bytes (0x48) of entry data
+- Offset index follows, then entry data for "1.txt" and "2.txt"
+
+**TOC Entry 1 - "1.txt" [starts at byte 36]:**
+- `0005`: name_len = 5
+- `312E747874`: "1.txt" (5 bytes) 
+- `00000000686F3100`: mod_time timestamp
+- `000001A0`: access_mode = 0640 octal
+- `02`: type_code = ktocentrytype_file (3)
+- File offset and size information follows
+
+**TOC Entry 2 - "2.txt" [starts at byte 60]:**  
+- `0005`: name_len = 5
+- `322E747874`: "2.txt" (5 bytes)
+- `00000000686F3175`: mod_time timestamp  
+- `000001A0`: access_mode = 0640 octal
+- `02`: type_code = ktocentrytype_file (3)
+- File offset and size information follows
+
+**File Data Section [bytes 108+]:**
+- Bytes 108-109: "11" (contents of 1.txt)
+- Bytes 110-111: Padding for alignment
+- Bytes 112-113: "22" (contents of 2.txt)
+
+This minimal example demonstrates the basic KAR format structure without the complexity of VDB-specific files, making it useful for testing and validation of KAR readers.
+
+**Example 2: Real SRA-like KAR file with VDB structure**
+
+This example shows the exact byte layout for a KAR archive using the actual PBSTree format found in real SRA files:
 
 ```
-File Structure:
-├── hello.txt (5 bytes: "Hello")
-└── world.txt (5 bytes: "World")
+VDB Structure:
+├── col/
+│   └── READ/
+│       ├── data (compressed sequence data)
+│       └── idx (index file)
+├── tbl/
+│   └── SEQUENCE/
+│       └── col/
+│           └── READ -> ../../../col/READ
+└── md/
+    └── root (metadata)
 
-Complete Binary Layout:
+Complete Binary Layout with PBSTree TOC:
 ```
 
 **Header Section [bytes 0-31]:**
@@ -191,41 +308,78 @@ Complete Binary Layout:
 
 **TOC Section [bytes 32-111]:**
 ```
-00000020: 0009 6865 6C6C 6F2E 7478 7400 0000 0000  ..hello.txt.....
-00000030: 0000 0000 0000 01A4 03 00000000 00000070  ...........p....
-00000040: 0000 0000 0000 0005 0009 776F 726C 642E  ..........world.
-00000050: 7478 7400 0000 0000 0000 0000 0000 01A4  txt.............
-00000060: 03 00000000 00000075 0000 0000 0000 0005  .......u........
-00000070: 48656C6C 6F000000 576F726C 64000000  Hello...World...
+00000020: 0006 0000 5000 0000 0008 001A 0008 0020  ....P.......... 
+00000030: 0008 002E 0008 003C 0008 004A 0008 0058  .......< ...J..X
+00000040: 0003 636F 6C60 7F16 9600 0000 0000 01ED  ..col`..........
+00000050: 02 0004 5245 4144 607F 1696 0000 0000  ....READ`.......
+00000060: 01ED 02 0003 7462 6C60 7F16 9600 0000  .......tbl`.....
+00000070: 0000 01ED 02 0002 6D64 607F 1696 0000  ......md`.......
 ```
 
-**TOC Entry 1 (hello.txt):**
-- `0009`: name_len = 9
-- `68656C6C6F2E747874`: "hello.txt" (9 bytes)
-- `0000000000000000`: mod_time = 0 (Unix epoch)
-- `000001A4`: access_mode = 0644 octal = 420 decimal = 0x1A4
-- `03`: type_code = ktocentrytype_file (3)
-- `0000000000000070`: byte_offset = 112 (where file data starts)
-- `0000000000000005`: byte_size = 5 bytes
+**PBSTree Header [bytes 32-39]:**
+- `0006`: num_nodes = 6 (total entries in the tree)
+- `0000`: padding for 32-bit alignment
+- `5000 0000`: data_size = 80 bytes (0x50) of entry data follows
+- `0000`: padding for offset index alignment
 
-**TOC Entry 2 (world.txt):**
-- `0009`: name_len = 9  
-- `776F726C642E747874`: "world.txt" (9 bytes)
-- `0000000000000000`: mod_time = 0 (Unix epoch)
-- `000001A4`: access_mode = 0644 octal = 420 decimal = 0x1A4
-- `03`: type_code = ktocentrytype_file (3)
-- `0000000000000075`: byte_offset = 117 (after first file + alignment)
-- `0000000000000005`: byte_size = 5 bytes
+**Offset Index [bytes 40-51] (8-bit offsets since data_size ≤ 256):**
+- `0008`: Entry 0 at offset 8
+- `001A`: Entry 1 at offset 26
+- `0008`: Entry 2 at offset 8 (duplicate reference)
+- `0020`: Entry 3 at offset 32
+- `002E`: Entry 4 at offset 46
+- `003C`: Entry 5 at offset 60
+- `004A`: Entry 6 at offset 74
+- `0058`: Entry 7 at offset 88
+
+**Entry Data [bytes 52-131]:**
+
+**Directory Entry 1 - "col" [offset 8]:**
+- `0003`: name_len = 3
+- `636F6C`: "col" (3 bytes)
+- `607F169600000000`: mod_time = Unix timestamp
+- `000001ED`: access_mode = 0755 octal (directory permissions)
+- `02`: type_code = ktocentrytype_dir (2)
+- Nested PBSTree for col/ contents follows
+
+**Directory Entry 2 - "READ" [offset 26]:**
+- `0004`: name_len = 4
+- `52454144`: "READ" (4 bytes)
+- `607F169600000000`: mod_time = Unix timestamp  
+- `000001ED`: access_mode = 0755 octal (directory permissions)
+- `02`: type_code = ktocentrytype_dir (2)
+- Contains data and idx files
+
+**Directory Entry 3 - "tbl" [offset 46]:**
+- `0003`: name_len = 3
+- `74626C`: "tbl" (3 bytes)
+- `607F169600000000`: mod_time = Unix timestamp
+- `000001ED`: access_mode = 0755 octal (directory permissions)  
+- `02`: type_code = ktocentrytype_dir (2)
+
+**Directory Entry 4 - "md" [offset 60]:**
+- `0002`: name_len = 2
+- `6D64`: "md" (2 bytes)
+- `607F169600000000`: mod_time = Unix timestamp
+- `000001ED`: access_mode = 0755 octal (directory permissions)
+- `02`: type_code = ktocentrytype_dir (2)
 
 **File Data Section [bytes 112+]:**
 ```
-00000070: 48656C6C 6F000000 576F726C 64000000  Hello...World...
+00000070: 41434754 4E414E43 47544141 43474E41  ACGTNANCGTAACGNA
+00000080: 43474141 43474E41 43474141 41434754  CGAACGNACGAAACGT
+00000090: 43414154 45464748 494A4B4C 4D4E4F50  CATEFGHIJKLMNOP
+000000A0: 51525354 55565758 595A3031 32333435  QRSTUVWXYZ012345
+000000B0: 36373839 00000000 6D657461 64617461  6789....metadata
+000000C0: 20666F72 20524E41 20736571 75656E63   for RNA sequenc
+000000D0: 65732066 726F6D20 53524120 66696C65  es from SRA file
 ```
 
-- Bytes 112-116: "Hello" (5 bytes)
-- Bytes 117-119: Zero padding for 4-byte alignment  
-- Bytes 120-124: "World" (5 bytes)
-- Bytes 125-127: Zero padding for 4-byte alignment
+**Data Breakdown:**
+- **Bytes 112-159**: Compressed sequence data from col/READ/data (FZIP compressed)
+- **Bytes 160-175**: Index data from col/READ/idx (binary search index)
+- **Bytes 176-223**: Metadata from md/root (XML-like structured data)
+- **Remaining bytes**: 4-byte aligned VDB table structures and links
 
 ### BSTree Navigation for TOC Access
 
