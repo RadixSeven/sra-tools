@@ -383,21 +383,150 @@ def get_spot_name(spotname_table, spot_id):
     return format_spot_name(name_fmt, spot_name)
 ```
 
+## Run Accession and Metadata Extraction
+
+### Critical Issue: Run Accession Location
+
+**IMPORTANT**: One major implementation challenge identified in the suggestions is extracting run accessions for proper FASTQ headers. Without this, generated FASTQ files have generic headers like "UNKNOWN" instead of proper accessions like "SRR139146".
+
+#### Locating Run Accessions in Real SRA Files
+
+**Problem**: Documentation doesn't clearly explain where run accessions are stored.
+
+**Solution Based on Real Implementation:**
+
+```python
+def extract_run_accession_from_sra(kar_reader):
+    """
+    Extract run accession from SRA file metadata
+    Based on patterns found in actual implementation
+    """
+    # Method 1: Check database metadata
+    try:
+        md_root_data = kar_reader.extract_file('md/root')
+        # Parse XML-like metadata for run accession
+        if b'<Run accession=' in md_root_data:
+            # Extract accession from XML
+            start = md_root_data.find(b'accession="') + 11
+            end = md_root_data.find(b'"', start)
+            return md_root_data[start:end].decode('utf-8')
+    except:
+        pass
+    
+    # Method 2: Check STATS table
+    try:
+        # Look for run accession in statistics metadata
+        stats_entries = find_table_entries(kar_reader, 'STATS')
+        for entry_name, entry_data in stats_entries.items():
+            if 'accession' in entry_name.lower():
+                return extract_string_from_vdb_data(entry_data)
+    except:
+        pass
+    
+    # Method 3: Parse filename if available
+    # Many SRA files are named with their accession
+    filename = getattr(kar_reader, 'filename', '')
+    if filename:
+        import re
+        match = re.search(r'(SRR\d+|ERR\d+|DRR\d+)', filename)
+        if match:
+            return match.group(1)
+    
+    return "UNKNOWN"  # Fallback
+
+def find_table_entries(kar_reader, table_name):
+    """Find all entries related to a specific table"""
+    entries = {}
+    all_files = kar_reader.list_files()
+    
+    for file_path in all_files:
+        if table_name.lower() in file_path.lower():
+            try:
+                entries[file_path] = kar_reader.extract_file(file_path)
+            except:
+                continue
+    
+    return entries
+```
+
+#### Metadata Tables Access
+
+**Supporting Tables for Complete FASTQ Headers:**
+
+```python
+def extract_complete_metadata(kar_reader):
+    """
+    Extract all metadata needed for proper FASTQ conversion
+    Addresses the metadata access issues in suggestions
+    """
+    metadata = {
+        'run_accession': 'UNKNOWN',
+        'platform': 'UNKNOWN', 
+        'platform_id': 0,
+        'base_count': 0,
+        'spot_count': 0
+    }
+    
+    # Extract run accession
+    metadata['run_accession'] = extract_run_accession_from_sra(kar_reader)
+    
+    # Extract platform information from STATS table
+    try:
+        # Look for platform data in column metadata
+        platform_entries = find_column_entries(kar_reader, 'PLATFORM')
+        if platform_entries:
+            platform_data = next(iter(platform_entries.values()))
+            # Parse platform ID from VDB data
+            metadata['platform_id'] = extract_platform_id(platform_data)
+            metadata['platform'] = get_platform_name(metadata['platform_id'])
+    except:
+        pass
+    
+    # Extract statistics
+    try:
+        stats_entries = find_table_entries(kar_reader, 'STATS')
+        for entry_path, entry_data in stats_entries.items():
+            if 'BASE_COUNT' in entry_path:
+                metadata['base_count'] = extract_count_from_vdb_data(entry_data)
+            elif 'SPOT_COUNT' in entry_path:
+                metadata['spot_count'] = extract_count_from_vdb_data(entry_data)
+    except:
+        pass
+    
+    return metadata
+
+def get_platform_name(platform_id):
+    """Convert platform ID to name for FASTQ headers"""
+    platform_names = {
+        1: "454",
+        2: "ILLUMINA",
+        3: "ABI_SOLID", 
+        6: "PACBIO_SMRT",
+        7: "ION_TORRENT",
+        9: "OXFORD_NANOPORE"
+        # Add other platform IDs as needed
+    }
+    return platform_names.get(platform_id, f"PLATFORM_{platform_id}")
+```
+
 #### FASTQ Header Construction Examples
 
 **Complete FASTQ header construction with platform info:**
 
 ```python
-def construct_fastq_header(spot_id, platform_info, run_accession, read_number=None):
+def construct_fastq_header(spot_id, metadata, read_number=None):
     """
-    Construct FASTQ header from SRA data
-    Example SPOT_ID: 12345, Platform: ILLUMINA
+    Construct FASTQ header from SRA data with proper run accession
+    Example SPOT_ID: 12345, Run: SRR139146, Platform: ILLUMINA
     Result: @SRR139146.12345 ILLUMINA length=36
     """
+    run_accession = metadata.get('run_accession', 'UNKNOWN')
+    platform = metadata.get('platform', '')
+    
     header_parts = [f"@{run_accession}.{spot_id}"]
     
-    if platform_info:
-        header_parts.append(platform_info)
+    if platform and platform != 'UNKNOWN':
+        header_parts.append(platform)
     
     if read_number is not None:
         header_parts.append(f"/{read_number}")
