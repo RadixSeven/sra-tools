@@ -381,6 +381,197 @@ Complete Binary Layout with PBSTree TOC:
 - **Bytes 176-223**: Metadata from md/root (XML-like structured data)
 - **Remaining bytes**: 4-byte aligned VDB table structures and links
 
+## KAR TOC Format Detection
+
+### Determining TOC Serialization Format
+
+When parsing real SRA files, the TOC data may use different serialization approaches. Here's how to programmatically determine the format:
+
+#### Primary Detection Method
+
+**Step 1: Validate KAR Header**
+```c
+// From sra.c - Header validation with byte order detection
+rc_t detect_kar_format(const uint8_t* file_data, bool* is_byteswapped, uint32_t* version) {
+    const KSraHeader* header = (const KSraHeader*)file_data;
+    
+    // Check magic signature: "NCBI.sra"
+    if (memcmp(header->ncbi, "NCBI", 4) != 0 || 
+        memcmp(header->sra, ".sra", 4) != 0) {
+        return RC_INVALID_FORMAT;
+    }
+    
+    // Detect byte order
+    switch (header->byte_order) {
+        case 0x05031988:  // eSraByteOrderTag - native
+            *is_byteswapped = false;
+            break;
+        case 0x88190305:  // eSraByteOrderReverse - swapped  
+            *is_byteswapped = true;
+            break;
+        default:
+            return RC_INVALID_BYTEORDER;
+    }
+    
+    // Extract version (accounting for byte order)
+    *version = *is_byteswapped ? bswap_32(header->version) : header->version;
+    return (*version <= 1) ? 0 : RC_UNSUPPORTED_VERSION;
+}
+```
+
+**Step 2: Format-Specific TOC Parsing**
+```c
+// Version-based parsing dispatch
+switch (version) {
+    case 1:
+        // Parse PBSTree format (current standard)
+        rc = parse_pbstree_toc(file_data, header_size, is_byteswapped);
+        break;
+    default:
+        // Future versions would be handled here
+        rc = RC_UNSUPPORTED_VERSION;
+        break;
+}
+```
+
+#### PBSTree Format Variations
+
+The PBSTree format supports multiple node indexing schemes based on data size:
+
+```c
+// From pbstree-priv.h - Automatic index size selection
+struct P_BSTree {
+    uint32_t num_nodes;
+    uint32_t data_size;
+    union {
+        uint8_t  v8[4];   // For data_size <= 256
+        uint16_t v16[2];  // For data_size <= 65536  
+        uint32_t v32[1];  // For data_size > 65536
+    } data_idx;
+};
+
+// Detection logic for index size
+int detect_index_size(uint32_t data_size) {
+    if (data_size <= 256) return 8;     // 8-bit indices
+    if (data_size <= 65536) return 16;  // 16-bit indices
+    return 32;                          // 32-bit indices
+}
+```
+
+#### Alternative TOC Formats
+
+While PBSTree is the standard, the architecture supports other formats:
+
+1. **Directory-based TOC**: Direct filesystem representation
+2. **TAR-based TOC**: Traditional tar archive format
+3. **Future formats**: Extensible through version number
+
+## VDB Directory Structure Integration
+
+### Mapping VDB Hierarchical Paths to KAR TOC Entries
+
+VDB uses hierarchical paths like `tbl/SEQUENCE/col/READ`, but KAR stores these as flat TOC entries. Here's how the integration works:
+
+#### Path Reconstruction Algorithm
+
+**VDB Path Format:**
+- `tbl/[TABLE_NAME]/col/[COLUMN_NAME]/data` - Column data file
+- `tbl/[TABLE_NAME]/col/[COLUMN_NAME]/idx` - Column index file  
+- `col/[COLUMN_NAME]/data` - Global column data
+- `md/root` - Database metadata
+
+**KAR TOC Flat Storage:**
+Each directory level becomes a separate TOC entry with nested PBSTree structures for subdirectories.
+
+```c
+// Path decomposition example
+typedef struct VDBPathInfo {
+    char* table_name;     // "SEQUENCE" 
+    char* column_name;    // "READ"
+    char* file_type;      // "data", "idx", "idx1", "idx2"
+    bool is_global;       // col/ vs tbl/.../col/
+} VDBPathInfo;
+
+// Parse VDB path into components
+int parse_vdb_path(const char* path, VDBPathInfo* info) {
+    if (strncmp(path, "tbl/", 4) == 0) {
+        // Table-specific column: tbl/SEQUENCE/col/READ/data
+        info->is_global = false;
+        // Extract table_name, column_name, file_type
+    } else if (strncmp(path, "col/", 4) == 0) {
+        // Global column: col/READ/data  
+        info->is_global = true;
+        // Extract column_name, file_type
+    } else if (strncmp(path, "md/", 3) == 0) {
+        // Metadata file
+        // Handle metadata paths
+    }
+    return 0;
+}
+```
+
+#### Nested PBSTree Directory Traversal
+
+Directory entries in the TOC contain nested PBSTree structures:
+
+```c
+// Traverse nested directory structure
+rc_t traverse_vdb_directory(const TOCEntry* dir_entry, const char* target_path) {
+    if (dir_entry->type_code != ktocentrytype_dir) {
+        return RC_NOT_DIRECTORY;
+    }
+    
+    // Directory entries contain nested PBSTree data
+    PBSTree* nested_tree;
+    rc = PBSTreeMake(&nested_tree, 
+                     dir_entry->nested_data, 
+                     dir_entry->nested_size,
+                     is_byteswapped);
+    
+    // Search nested tree for next path component
+    char* next_component = get_next_path_component(target_path);
+    TOCEntry* child_entry = pbstree_find(nested_tree, next_component);
+    
+    return process_child_entry(child_entry, remaining_path);
+}
+```
+
+#### Directory Structure Patterns
+
+**Standard VDB Database Layout in KAR TOC:**
+```
+/ (root)
+├── md/ (directory entry with nested PBSTree)
+│   ├── cur (file entry)
+│   ├── vers (file entry) 
+│   └── root (file entry)
+├── tbl/ (directory entry with nested PBSTree)
+│   └── SEQUENCE/ (directory entry with nested PBSTree)
+│       ├── md/ (directory with table metadata)
+│       └── col/ (directory entry with nested PBSTree)
+│           ├── READ/ (directory entry with nested PBSTree)
+│           │   ├── data (file entry -> actual blob data)
+│           │   ├── idx (file entry -> index data)
+│           │   ├── idx1 (file entry -> level 1 index)
+│           │   └── idx2 (file entry -> level 2 index)
+│           └── QUALITY/ (directory entry with nested PBSTree)
+│               ├── data (file entry)
+│               └── idx (file entry)
+└── col/ (directory entry - global column definitions)
+    ├── READ/ (directory entry with nested PBSTree)
+    │   ├── data (file entry)
+    │   └── vers (file entry)
+    └── QUALITY/ (directory entry with nested PBSTree)
+        ├── data (file entry)
+        └── vers (file entry)
+```
+
+**Key Integration Points:**
+- **Directories**: Stored as `ktocentrytype_dir` with nested PBSTree data
+- **Files**: Stored as `ktocentrytype_file` with offset/size pointers
+- **Path separators**: Directory boundaries, not stored as literal '/' characters
+- **Navigation**: Each directory level requires separate PBSTree traversal
+
 ### BSTree Navigation for TOC Access
 
 The TOC is organized as a persistent binary search tree. Here's how to traverse it programmatically:
