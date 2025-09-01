@@ -164,7 +164,7 @@ struct TOCEntry {
     // Directory (type_code = 2):
     // Nested PBSTree with child entries follows
 
-    // File (type_code = 3):
+    // File (type_code = 2):
     uint64_t archive_offset; // Offset in archive file
     uint64_t file_size;      // Size of file data
 
@@ -429,36 +429,43 @@ hexdump -C 1-and-2.kar
 ```
 
 **Header Section [bytes 0-31]:**
-- `4E434249 2E737261`: "NCBI.sra" magic signature
-- `05031988`: Normal byte order (0x05031988)
-- `00000001`: Version 1
-- `000000000000006C`: File data starts at offset 108 (0x6C)
+- `4E434249 2E737261` [00-07]: "NCBI.sra" magic signature
+- `05031988` [08-0b]: Normal byte order (0x05031988)
+- `00000001` [0c-0f]: Version 1
+- `000000000000006C` [10-17]: File data starts at offset 108 (0x6C)
 
-**PBSTree TOC Section [bytes 32-107]:**
-- `00000002`: num_nodes = 2 entries
-- `00000048`: data_size = 72 bytes (0x48) of entry data
-- Offset index follows, then entry data for "1.txt" and "2.txt"
+**Root PBSTree TOC Section [bytes 32-107]:**
+- `00000002` [18-1b]: num_nodes = 2 entries (1.txt, 2.txt)
+- `00000048` [1c-1f]: data_size = 72 bytes (0x48) of entry data
+- `00 24` [20-21]: Index array (offsets: 0, 36 in data section)
 
-**TOC Entry 1 - "1.txt" [starts at byte 36]:**
-- `0005`: name_len = 5
-- `312E747874`: "1.txt" (5 bytes)
-- `00000000686F3100`: mod_time timestamp
-- `000001A0`: access_mode = 0640 octal
-- `02`: type_code = ktocentrytype_file (2)
-- File offset and size information follows
+**Root TOC Entry 1 - "1.txt" [data offset 0]:**
+- `0005` [22-23]: name_len = 5
+- `31 2E 74 78 74` [24-28]: "1.txt" (5 bytes)
+- `00000000686FB441` [29-30]: mod_time timestamp
+- `00000180` [31-34]: access_mode = 0600 octal
+- `02` [35]: type_code = ktocentrytype_file (2)
+- ktocentrytype_file fields:
+  - `0000000000000000` [36-3d]: file_offset in the data section = 0
+  - `0000000000000002` [3e-45]: file_size = 2 bytes
 
-**TOC Entry 2 - "2.txt" [starts at byte 60]:**
-- `0005`: name_len = 5
-- `322E747874`: "2.txt" (5 bytes)
-- `00000000686F3175`: mod_time timestamp
-- `000001A0`: access_mode = 0640 octal
-- `02`: type_code = ktocentrytype_file (2)
-- File offset and size information follows
+**Root TOC Entry 2 - "2.txt" [data offset 36]:**
+- `0005` [46-47]: name_len = 5
+- `32 2E 74 78 74` [48-4c]: "2.txt" (5 bytes)
+- `00000000686FB441` [4d-54]: mod_time timestamp
+- `00000180` [55-58]: access_mode = 0600 octal
+- `02` [59]: type_code = ktocentrytype_file (2)
+- ktocentrytype_file fields:
+  - `0000000000000004` [5a-61]: file_offset in the data section = 4
+  - `0000000000000002` [62-69]: file_size = 2 bytes
+
+**Padding:**
+- `0000` [6a-6b]: null padding to 4-byte boundary
 
 **File Data Section [bytes 108+]:**
-- Bytes 108-109: "11" (contents of 1.txt)
-- Bytes 110-111: Padding for alignment
-- Bytes 112-113: "22" (contents of 2.txt)
+- `3131` [6c-6d]: "11" (contents of 1.txt, file_offset=0, size=2)
+- `3030` [6e-6f]: "00" (padding for alignment)
+- `3232` [70-71]: "22" (contents of 2.txt, file_offset=4, size=2)
 
 This minimal example demonstrates the basic KAR format structure without the complexity of VDB-specific files, making it useful for testing and validation of KAR readers.
 
@@ -642,7 +649,7 @@ Complete Binary Layout with PBSTree TOC:
 - `636F6C`: "col" (3 bytes)
 - `607F169600000000`: mod_time = Unix timestamp
 - `000001ED`: access_mode = 0755 octal (directory permissions)
-- `02`: type_code = ktocentrytype_dir (1)
+- `01`: type_code = ktocentrytype_dir (1)
 - Nested PBSTree for col/ contents follows
 
 **Directory Entry 2 - "READ" [offset 26]:**
@@ -650,7 +657,7 @@ Complete Binary Layout with PBSTree TOC:
 - `52454144`: "READ" (4 bytes)
 - `607F169600000000`: mod_time = Unix timestamp
 - `000001ED`: access_mode = 0755 octal (directory permissions)
-- `02`: type_code = ktocentrytype_dir (1)
+- `01`: type_code = ktocentrytype_dir (1)
 - Contains data and idx files
 
 **Directory Entry 3 - "tbl" [offset 46]:**
@@ -658,14 +665,14 @@ Complete Binary Layout with PBSTree TOC:
 - `74626C`: "tbl" (3 bytes)
 - `607F169600000000`: mod_time = Unix timestamp
 - `000001ED`: access_mode = 0755 octal (directory permissions)
-- `02`: type_code = ktocentrytype_dir (1)
+- `01`: type_code = ktocentrytype_dir (1)
 
 **Directory Entry 4 - "md" [offset 60]:**
 - `0002`: name_len = 2
 - `6D64`: "md" (2 bytes)
 - `607F169600000000`: mod_time = Unix timestamp
 - `000001ED`: access_mode = 0755 octal (directory permissions)
-- `02`: type_code = ktocentrytype_dir (1)
+- `01`: type_code = ktocentrytype_dir (1)
 
 **File Data Section [bytes 112+]:**
 ```
@@ -787,14 +794,14 @@ Actual SRA files contain TOC entries like:
 ```
 col                    # type_code=1 (directory marker)
 ALTREAD               # type_code=1 (column name)
-data                  # type_code=3 (file with archive_offset and size)
-idx                   # type_code=3 (index file)
+data                  # type_code=2 (file with archive_offset and size)
+idx                   # type_code=2 (index file)
 QUALITY               # type_code=1 (next column)
-data                  # type_code=3 (quality data file)
-idx                   # type_code=3 (quality index file)
+data                  # type_code=2 (quality data file)
+idx                   # type_code=2 (quality index file)
 READ                  # type_code=1 (sequence column)
-data                  # type_code=3 (sequence data)
-idx                   # type_code=3 (sequence index)
+data                  # type_code=2 (sequence data)
+idx                   # type_code=2 (sequence index)
 ```
 
 #### Path Reconstruction Algorithm for Real Files
@@ -818,7 +825,7 @@ def reconstruct_vdb_paths_from_linear_toc(toc_entries):
                 current_column = name
                 current_base_path = f"col/{name}/"
 
-        elif entry['type_code'] == 3:  # Actual file with data
+        elif entry['type_code'] == 2:  # Actual file with data
             if current_column and name in ['data', 'idx', 'idx1', 'idx2']:
                 vdb_path = current_base_path + name
                 vdb_files[vdb_path] = {
