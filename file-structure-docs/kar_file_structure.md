@@ -87,7 +87,7 @@ This allows for future format versions with different header sizes while maintai
 # means that you include all the fields of the superclass
 # as a prefix in the binary-encoded version.
 
-class KarHeader:  # 23-byte Fixed length header 0x0..0x17
+class KarHeader:  # 24-byte Fixed length header 0x0..0x17
     magic_number: uint_64  # Will be "ncbi.sra" (4e 43 42 49 2e 73 72 61)
     byte_order_marker: uint_32 # b"\x88\x19\x03\x05" if little endian. big-endian otherwise
     version: uint_32
