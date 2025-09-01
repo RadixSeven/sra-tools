@@ -586,6 +586,76 @@ This example demonstrates how the PBSTree format handles directories with nested
 
 #### Example 3: Real SRA-like KAR file with VDB structure
 
+Example 3 is a [real SRA file](short_sra_sample_file/short_sra_test.sra) created from [a fastq file](short_sra_sample_file/short_sra_test.fastq). It is located in [the `short_sra_sample_file/` directory](short_sra_sample_file/). However, converting to an SRA jumps the size to 75K, so its hex dump can't be included in this documentation in its completeness. Thus the file has been included with this documentation. The [the `short_sra_sample_file/` directory](short_sra_sample_file/) also contains [a hexdump](short_sra_sample_file/short_sra_test.sra.hexdump.txt) the [unpacked KAR directory](short_sra_sample_file/short_sra_test.sra.dir/) and a [text dump of the directory tree](short_sra_sample_file/short_sra_test.sra.dir.tree).
+
+##### Starting fastq
+
+```fastq
+@short_sra_test.1/1
+ACGT
++
+!mn~
+```
+
+##### Commands to make the files
+
+```sh
+latf-load --quality PHRED_33 short_sra_test.fastq -o short_sra_test.sra.dir
+kar --create short_sra_test.sra --directory short_sra_test.sra.dir/
+hexdump -C short_sra_test.sra > short_sra_test.sra.hexdump.txt
+tree short_sra_test.sra.dir/ > short_sra_test.sra.dir.tree
+```
+
+##### `short_sra_test.sra.dir/` Tree
+
+```none
+short_sra_test.sra.dir/
+├── md
+│   └── cur
+├── md5
+└── tbl
+    └── SEQUENCE
+        ├── col
+        ├── md
+        │   └── cur
+        └── md5
+```
+
+##### Starting hexdump
+
+Here is the hexdump including the first few lines of the data section.
+
+```
+#          0  1  2  3  4  5  6  7   8  9  a  b  c  d  e  f   0123456789abcdef
+00000000  4e 43 42 49 2e 73 72 61  88 19 03 05 01 00 00 00  |NCBI.sra........|
+00000010  38 01 00 00 00 00 00 00  03 00 00 00 0f 01 00 00  |8...............|
+00000020  00 00 3c 00 5e 00 02 00  6d 64 09 f3 b4 68 00 00  |..<.^...md...h..|
+00000030  00 00 c0 01 00 00 01 01  00 00 00 22 00 00 00 00  |..........."....|
+00000040  03 00 63 75 72 09 f3 b4  68 00 00 00 00 80 01 00  |..cur...h.......|
+00000050  00 02 6c 64 00 00 00 00  00 00 aa c4 00 00 00 00  |..ld............|
+00000060  00 00 03 00 6d 64 35 09  f3 b4 68 00 00 00 00 80  |....md5...h.....|
+00000070  01 00 00 02 00 00 00 00  00 00 00 00 29 00 00 00  |............)...|
+00000080  00 00 00 00 03 00 74 62  6c 09 f3 b4 68 00 00 00  |......tbl...h...|
+00000090  00 c0 01 00 00 01 01 00  00 00 96 00 00 00 00 08  |................|
+000000a0  00 53 45 51 55 45 4e 43  45 09 f3 b4 68 00 00 00  |.SEQUENCE...h...|
+000000b0  00 c0 01 00 00 01 03 00  00 00 74 00 00 00 00 16  |..........t.....|
+000000c0  52 03 00 63 6f 6c 09 f3  b4 68 00 00 00 00 c0 01  |R..col...h......|
+000000d0  00 00 01 00 00 00 00 02  00 6d 64 09 f3 b4 68 00  |.........md...h.|
+000000e0  00 00 00 c0 01 00 00 01  01 00 00 00 22 00 00 00  |............"...|
+000000f0  00 03 00 63 75 72 09 f3  b4 68 00 00 00 00 80 01  |...cur...h......|
+00000100  00 00 02 58 00 00 00 00  00 00 00 13 64 00 00 00  |...X........d...|
+00000110  00 00 00 03 00 6d 64 35  09 f3 b4 68 00 00 00 00  |.....md5...h....|
+00000120  80 01 00 00 02 2c 00 00  00 00 00 00 00 29 00 00  |.....,.......)..|
+00000130  00 00 00 00 00 00 00 00  62 66 31 36 62 64 63 36  |........bf16bdc6|
+00000140  61 33 33 38 61 65 65 32  66 33 63 61 32 31 32 66  |a338aee2f3ca212f|
+00000150  32 32 30 62 37 61 62 30  20 2a 6d 64 2f 63 75 72  |220b7ab0 *md/cur|
+00000160  0a 30 30 30 65 30 30 34  32 62 33 36 66 35 63 33  |.000e0042b36f5c3|
+00000170  65 61 30 38 34 66 37 65  65 32 30 62 32 66 39 35  |ea084f7ee20b2f95|
+00000180  61 30 30 61 20 2a 6d 64  2f 63 75 72 0a 30 30 30  |a00a *md/cur.000|
+```
+
+**TODO: The rest of this example contains fabricated data and incorrect offsets. It needs to be replaced with actual data from real SRA hex dumps or removed entirely.**
+
 This example shows the exact byte layout for a KAR archive using the actual PBSTree format found in real SRA files:
 
 ```
