@@ -1,0 +1,12 @@
+short_sra_test.sra.dir/
+├── md
+│   └── cur
+├── md5
+└── tbl
+    └── SEQUENCE
+        ├── col
+        ├── md
+        │   └── cur
+        └── md5
+
+5 directories, 4 files
