@@ -75,6 +75,106 @@ This allows for future format versions with different header sizes while maintai
 - Alignment function: `align_offset(offset, 4)`
 - Padding filled with zero bytes between TOC and file data
 
+### Kar file format pseudocode
+
+```python
+# Pseudocode for whole KAR format
+#
+# No padding between elements and they're not really
+# Python objects but binary data
+#
+# These are all distinguished unions, so "Inheritance"
+# means that you include all the fields of the superclass
+# as a prefix in the binary-encoded version.
+
+class KarHeader:  # 23-byte Fixed length header 0x0..0x17
+    magic_number: uint_64  # Will be "ncbi.sra" (4e 43 42 49 2e 73 72 61)
+    byte_order_marker: uint_32 # b"\x88\x19\x03\x05" if little endian. big-endian otherwise
+    version: uint_32
+    file_data_offset: uint_64
+
+class TocPBSTree:
+    """Multiple entries in the table of contents"""
+    num_nodes: uint_32
+    # Length of the data list in bytes
+    data_size: uint_32
+    # The offsets into the data list for each
+    # serialized TocEntry object.
+    # No padding between offsets
+    # The type stored in offsets is the smallest
+    # type that data_size fits in. So, if
+    # data_size <= 255, it's uint_8.
+    # If data_size <= 65535, it's uint_16.
+    # Otherwise its uint_32.
+    offsets: list[uint_8 | uint_16 | uint_32]
+    # Encodes TocEntry elements
+    # No padding between elements. Each
+    # entry is encoded starting at the offset in
+    # offsets. e.g.,
+    # data[offsets[i]:offsets.get(i+1, data_size)]
+    # holds the serialized i'th TocEntry object
+    data: list[byte]
+
+class TocEntry:
+    """The common fields in the distinguished union"""
+    # Length of name string
+    name_len: uint_16
+    # Name of entry - will be name_len bytes long
+    # Not null-terminated
+    name: bytes
+    # Last-modified time
+    mtime: int_64
+    # Unix file permissions
+    # e.g., 0600 becomes b'\x80\x01\x00\x00' (little endian)
+    access_mode: uint_32
+    # Distinguishes the union
+    # For TocDir this is '\x1'
+    # For TocFile this is '\x2'
+    # see KTocEntryType for a full list
+    int_8: type_code
+
+class TocDir(TocEntry):
+    """A directory entry in the table of contents
+
+    type_code must be 1
+    """
+    sub_tree: TocPBSTree
+
+class TocFile(TocEntry):
+    """A file entry in the table of contents
+
+    type_code must be 2
+
+    kar_file.file_data[file_offset:file_offset+file_size]
+    will contain all the data in the file.
+    """
+    # The offset from the start of the file data
+    # section to get to the first byte of the file
+    # This will always be a multiple of 4 because of
+    # the padding.
+    file_offset: uint_64
+    # Number of bytes in stored in the file
+    file_size: uint_64
+
+
+class KarFile:
+    """The whole KAR file.
+
+    This represents it as if it is present in memory, however,
+    in an actual implementation you'll probably keep at least
+    file_data on disk. (Though mmap would give a layout like
+    the in-memory representation here.)
+    """
+    header: KarHeader
+    toc: TocPBSTree  # The whole table of contents as a "PBSTree"
+                     # Note: TOC = Table of Contents
+    padding: bytes # Null padding to a 4-byte boundary
+    file_data: bytes # Rest of file. Broken up by info in TOC.
+                     # Each file's data is padded to a 4-byte
+                     # boundary with the character "0"
+```
+
+
 ## Table of Contents (TOC) Format
 
 ### Entry Types
@@ -379,6 +479,7 @@ hexdump -C 1-and-2.kar
 00000070  32 32                                             |22|
 00000072
 ```
+
 
 **Header Section [bytes 0-31]:**
 - `4E434249 2E737261` [00-07]: "NCBI.sra" magic signature
