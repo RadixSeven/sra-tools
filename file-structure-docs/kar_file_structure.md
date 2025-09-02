@@ -239,6 +239,8 @@ The TOC is serialized as a **Persistent Binary Search Tree (PBSTree)** immediate
 struct PBSTreeHeader {
     uint32_t num_nodes;      // Number of nodes in the tree
     uint32_t data_size;      // Total size of entry data that follows
+                            // Note: For empty directories (num_nodes = 0),
+                            // data_size field may be omitted as an optimization
     // Variable-size data index follows (based on data_size):
     // If data_size <= 256:    uint8_t  offsets[num_nodes];
     // If data_size <= 65536:  uint16_t offsets[num_nodes];
@@ -261,7 +263,7 @@ struct TOCEntry {
 
     // Type-specific data follows:
 
-    // Directory (type_code = 2):
+    // Directory (type_code = 1):
     // Nested PBSTree with child entries follows
 
     // File (type_code = 2):
@@ -297,14 +299,17 @@ struct TOCEntry {
 typedef enum KTocEntryType {
     ktocentrytype_unknown    = -1,
     ktocentrytype_notfound   = 0,
-    ktocentrytype_dir        = 1,
-    ktocentrytype_file       = 2,
+    ktocentrytype_dir        = 1,   // Directory entry
+    ktocentrytype_file       = 2,   // Regular file entry
     ktocentrytype_chunked    = 3,
     ktocentrytype_softlink   = 4,
     ktocentrytype_hardlink   = 5,
     ktocentrytype_emptyfile  = 6,
     ktocentrytype_zombiefile = 7
 } KTocEntryType;
+
+**Entry Name Validation:**
+TOC entries with empty names (name_len = 0) must be rejected as invalid.
 ```
 
 ### PBSTree Format Example - Source Code References
@@ -325,11 +330,13 @@ typedef enum KTocEntryType {
 
 Based on analysis of both the NCBI source code implementation and real file validation, the TOC section uses the standard PBSTree format as implemented in the NCBI libraries.
 
-**Confirmed PBSTree Format (from `pbstree-impl.c` parsing logic):**
+**PBSTree Format with Empty Directory Optimization:**
 ```c
 struct P_BSTree {
     uint32_t num_nodes;      // Number of entries in the tree
     uint32_t data_size;      // Total size of the data section
+                            // OPTIMIZATION: For empty directories (num_nodes = 0),
+                            // this field may be omitted (4-byte header total)
 
     // Variable-size index array (depends on data_size):
     // - If data_size <= 256:    uint8_t data_idx[num_nodes]
@@ -339,6 +346,16 @@ struct P_BSTree {
     uint8_t data[data_size]; // The actual TOC entry data
 };
 ```
+
+**Empty Directory Handling:**
+When parsing PBSTree structures, implementers must handle two header formats:
+1. **Standard 8-byte header**: num_nodes + data_size (for non-empty directories)
+2. **Optimized 4-byte header**: num_nodes = 0 only (for empty directories, data_size implied as 0)
+
+**SOURCE CODE VERIFICATION**: This optimization is confirmed in NCBI VDB source code:
+- `pbstree-impl.c:PBSTreeImplSize()` returns `sizeof self->num_nodes` (4 bytes) when `num_nodes == 0`
+- `pbstree-priv.h:65` comments: "a node count - if zero, then the structure ends"
+- `pbstree-impl.c:PBSTreeImplCheckPersisted()` skips `data_size` validation when `num_nodes == 0`
 
 **Byte Order Handling:**
 - Files with byte order marker `0x05031988` (normal): Parse integers as little-endian
@@ -429,13 +446,15 @@ Offset  Size  Field       Description
 **Implementation Requirements:**
 
 To parse PBSTree TOC data, implementers must:
-1. Read `num_nodes` and `data_size` as 32-bit little-endian values (or byte-swap if needed)
-2. Determine index array type based on `data_size` value:
+1. Read `num_nodes` as 32-bit little-endian value (or byte-swap if needed)
+2. **Empty Directory Check**: If `num_nodes = 0`, treat as optimized 4-byte header (no data_size field)
+3. **Non-empty Directories**: Read `data_size` and determine index array type:
    - If `data_size ≤ 256`: Use 8-bit indices (`num_nodes` bytes)
    - If `data_size ≤ 65536`: Use 16-bit indices (`num_nodes × 2` bytes)
    - Otherwise: Use 32-bit indices (`num_nodes × 4` bytes)
-3. Parse entry data using indices as offsets into the data section
-4. Handle byte swapping for all multi-byte integers based on header byte order
+4. Parse entry data using indices as offsets into the data section
+5. Handle byte swapping for all multi-byte integers based on header byte order
+6. **Name Validation**: Reject any entries with name_len = 0 as invalid
 
 ### Concrete PBSTree Binary Format Example
 
@@ -895,22 +914,11 @@ switch (version) {
 }
 ```
 
-#### PBSTree Format Variations
+#### PBSTree Index Size Detection
 
 The PBSTree format supports multiple node indexing schemes based on data size:
 
 ```c
-// From pbstree-priv.h - Automatic index size selection
-struct P_BSTree {
-    uint32_t num_nodes;
-    uint32_t data_size;
-    union {
-        uint8_t  v8[4];   // For data_size <= 256
-        uint16_t v16[2];  // For data_size <= 65536
-        uint32_t v32[1];  // For data_size > 65536
-    } data_idx;
-};
-
 // Detection logic for index size
 int detect_index_size(uint32_t data_size) {
     if (data_size <= 256) return 8;     // 8-bit indices
@@ -1224,7 +1232,7 @@ Each file entry preserves:
 
 ### TOC Validation
 
-1. **Name Length Check**: Ensure name_len > 0 and < 65536
+1. **Name Length Check**: Ensure name_len > 0 and < 65536 (reject empty names)
 2. **Type Code Validation**: Verify type_code is valid enum value
 3. **Tree Structure**: Validate BSTree invariants and structure
 4. **Offset Bounds**: Ensure all offsets point within file bounds
