@@ -75,17 +75,16 @@ This allows for future format versions with different header sizes while maintai
 - Alignment function: `align_offset(offset, 4)`
 - Padding filled with zero bytes between TOC and file data
 
-### Kar file format pseudocode
+### Complete KAR File Format Definition (Python-ish Pseudocode)
+
+**NOTE**: This section provides the authoritative structure definitions for the entire KAR format. All other sections reference these definitions.
 
 ```python
-# Pseudocode for whole KAR format
+# Complete pseudocode for KAR format structures
 #
-# No padding between elements and they're not really
-# Python objects but binary data
-#
-# These are all distinguished unions, so "Inheritance"
-# means that you include all the fields of the superclass
-# as a prefix in the binary-encoded version.
+# These represent binary data with no padding between elements.
+# Distinguished unions use "inheritance" by including all superclass
+# fields as a prefix in the binary-encoded version.
 
 class KarHeader:  # 24-byte Fixed length header 0x0..0x17
     magic_number: uint_64  # Will be "ncbi.sra" (4e 43 42 49 2e 73 72 61)
@@ -94,67 +93,102 @@ class KarHeader:  # 24-byte Fixed length header 0x0..0x17
     file_data_offset: uint_64
 
 class TocPBSTree:
-    """Multiple entries in the table of contents"""
+    """Multiple entries in the table of contents (Persistent Binary Search Tree)"""
+    # Number of entries in the offsets field
+    # EMPTY DIRECTORY OPTIMIZATION: If num_nodes == 0,
+    # all other fields are omitted (4-byte header total)
     num_nodes: uint_32
+
+    # Optional field - see num_nodes
     # Length of the data list in bytes
     data_size: uint_32
-    # The offsets into the data list for each
-    # serialized TocEntry object.
-    # No padding between offsets
-    # The type stored in offsets is the smallest
-    # type that data_size fits in. So, if
-    # data_size <= 255, it's uint_8.
-    # If data_size <= 65535, it's uint_16.
-    # Otherwise its uint_32.
+
+    # Optional field - see num_nodes
+    # The offsets into the data list for each serialized TocEntry object.
+    # No padding between offsets. The type stored in offsets is the smallest
+    # type that data_size fits in:
+    # - If data_size <= 255: uint_8 indices
+    # - If data_size <= 65535: uint_16 indices
+    # - Otherwise: uint_32 indices
     offsets: list[uint_8 | uint_16 | uint_32]
-    # Encodes TocEntry elements
-    # No padding between elements. Each
-    # entry is encoded starting at the offset in
-    # offsets. e.g.,
-    # data[offsets[i]:offsets.get(i+1, data_size)]
-    # holds the serialized i'th TocEntry object
+
+    # Optional field - see num_nodes
+    # Encodes TocEntry elements with no padding between elements.
+    # Each entry is encoded starting at the offset in offsets:
+    # data[offsets[i]:offsets.get(i+1, data_size)] holds the i'th TocEntry
     data: list[byte]
 
 class TocEntry:
-    """The common fields in the distinguished union"""
-    # Length of name string
+    """Base TOC entry with common fields for all entry types"""
+    # Length of name string (must be > 0, empty names are invalid)
     name_len: uint_16
-    # Name of entry - will be name_len bytes long
-    # Not null-terminated
+    # Name of entry - will be name_len bytes long, not null-terminated
     name: bytes
-    # Last-modified time
+    # Last-modified Unix timestamp (signed 64-bit)
     mtime: int_64
-    # Unix file permissions
-    # e.g., 0600 becomes b'\x80\x01\x00\x00' (little endian)
+    # Unix file permissions (e.g., 0600 becomes b'\x80\x01\x00\x00' little endian)
     access_mode: uint_32
-    # Distinguishes the union
-    # For TocDir this is '\x1'
-    # For TocFile this is '\x2'
-    # see KTocEntryType for a full list
-    int_8: type_code
+    # Entry type distinguisher (KTocEntryType enum):
+    # 0 = notfound, 1 = dir, 2 = file, 3 = chunked, 4 = softlink,
+    # 5 = hardlink, 6 = emptyfile, 7 = zombiefile
+    type_code: uint_8
 
 class TocDir(TocEntry):
-    """A directory entry in the table of contents
-
-    type_code must be 1
-    """
+    """Directory entry (type_code = 1) containing nested directory structure"""
+    # Nested PBSTree structure with child entries follows immediately
+    # Uses same TocPBSTree format recursively
     sub_tree: TocPBSTree
 
 class TocFile(TocEntry):
-    """A file entry in the table of contents
-
-    type_code must be 2
+    """Regular file entry (type_code = 2) pointing to actual file data
 
     kar_file.file_data[file_offset:file_offset+file_size]
     will contain all the data in the file.
     """
-    # The offset from the start of the file data
-    # section to get to the first byte of the file
-    # This will always be a multiple of 4 because of
-    # the padding.
+    # Offset from start of file data section to first byte of file
+    # Always multiple of 4 due to alignment padding
     file_offset: uint_64
-    # Number of bytes in stored in the file
+    # Number of bytes stored in the file
     file_size: uint_64
+
+class TocChunkedFile(TocEntry):
+    """Chunked file entry (type_code = 3) for non-contiguous storage"""
+    # Virtual file size (total logical size including gaps)
+    file_size: uint_64
+    # Virtual archive offset (for compatibility with file interface)
+    archive_offset: uint_64
+    # Number of chunks in chunks array
+    num_chunks: uint_32
+    # Array of chunk descriptors
+    chunks: list[TocChunk]
+
+class TocChunk:
+    """Individual chunk within a chunked file"""
+    logical_position: uint_64    # Position within logical file
+    source_position: uint_64     # Position within source container file
+    size: uint_64               # Size of this chunk
+
+class TocSoftLink(TocEntry):
+    """Soft/symbolic link entry (type_code = 4)"""
+    # Length of link target path
+    link_len: uint_16
+    # Link target path (not null-terminated)
+    link_path: bytes
+
+class TocHardLink(TocEntry):
+    """Hard link entry (type_code = 5)"""
+    # Reference to target TOC entry (internal pointer, not serialized)
+    target_ref: TocEntry  # In binary format, this resolves to target entry
+
+class TocEmptyFile(TocEntry):
+    """Empty file entry (type_code = 6) - no additional data"""
+    pass
+
+class TocZombieFile(TocEntry):
+    """Zombie file entry (type_code = 7)"""
+    # Same structure as regular file but indicates incomplete/damaged file
+    file_size: uint_64      # Expected file size
+    archive_offset: uint_64 # Where file data would have been
 
 
 class KarFile:
@@ -233,65 +267,13 @@ typedef struct KARAlias {
 
 The TOC is serialized as a **Persistent Binary Search Tree (PBSTree)** immediately after the SRA header. This format provides efficient binary search access to archive entries.
 
-#### PBSTree Header Format
+### TOC Structure Details
 
-```c
-struct PBSTreeHeader {
-    uint32_t num_nodes;      // Number of nodes in the tree
-    uint32_t data_size;      // Total size of entry data that follows
-                            // Note: For empty directories (num_nodes = 0),
-                            // data_size field may be omitted as an optimization
-    // Variable-size data index follows (based on data_size):
-    // If data_size <= 256:    uint8_t  offsets[num_nodes];
-    // If data_size <= 65536:  uint16_t offsets[num_nodes];
-    // If data_size > 65536:   uint32_t offsets[num_nodes];
-};
-// Followed by: uint8_t entry_data[data_size];
-```
+**IMPORTANT**: All structure definitions are provided in the **Complete KAR File Format Definition** section above. This section covers implementation-specific details:
 
-#### Individual TOC Entry Format
-
-Each entry in the data section follows this format:
-
-```c
-struct TOCEntry {
-    uint16_t name_len;       // Length of entry name
-    char name[name_len];     // Entry name (not null-terminated)
-    int64_t mtime;          // Unix timestamp (signed 64-bit)
-    uint32_t access_mode;    // Unix permissions
-    uint8_t type_code;       // Entry type from KTocEntryType enum
-
-    // Type-specific data follows:
-
-    // Directory (type_code = 1):
-    // Nested PBSTree with child entries follows
-
-    // File (type_code = 2):
-    uint64_t archive_offset; // Offset in archive file
-    uint64_t file_size;      // Size of file data
-
-    // Chunked File (type_code = 4):
-    uint64_t file_size;      // Virtual file size
-    uint32_t num_chunks;     // Number of chunks
-    // For each chunk:
-    struct {
-        uint64_t logical_pos;    // Position in virtual file
-        uint64_t source_pos;     // Position in archive
-        uint64_t chunk_size;     // Size of this chunk
-    } chunks[num_chunks];
-
-    // Soft Link (type_code = 5):
-    uint16_t link_len;       // Length of link target
-    char link[link_len];     // Link target path
-
-    // Hard Link (type_code = 6):
-    uint16_t target_len;     // Length of target name
-    char target[target_len]; // Target entry name
-
-    // Empty File (type_code = 7):
-    // No additional data
-};
-```
+- **Index Size Selection**: `TocPBSTree.offsets` element size is automatically chosen based on `data_size` value
+- **Name Validation**: Empty names (`TocEntry.name_len = 0`) must be rejected as invalid
+- **Type Codes**: See `TocEntry.type_code` comments in the pseudocode for all supported entry types
 
 #### Entry Type Constants
 
@@ -330,32 +312,6 @@ TOC entries with empty names (name_len = 0) must be rejected as invalid.
 
 Based on analysis of both the NCBI source code implementation and real file validation, the TOC section uses the standard PBSTree format as implemented in the NCBI libraries.
 
-**PBSTree Format with Empty Directory Optimization:**
-```c
-struct P_BSTree {
-    uint32_t num_nodes;      // Number of entries in the tree
-    uint32_t data_size;      // Total size of the data section
-                            // OPTIMIZATION: For empty directories (num_nodes = 0),
-                            // this field may be omitted (4-byte header total)
-
-    // Variable-size index array (depends on data_size):
-    // - If data_size <= 256:    uint8_t data_idx[num_nodes]
-    // - If data_size <= 65536:  uint16_t data_idx[num_nodes]
-    // - If data_size > 65536:   uint32_t data_idx[num_nodes]
-
-    uint8_t data[data_size]; // The actual TOC entry data
-};
-```
-
-**Empty Directory Handling:**
-When parsing PBSTree structures, implementers must handle two header formats:
-1. **Standard 8-byte header**: num_nodes + data_size (for non-empty directories)
-2. **Optimized 4-byte header**: num_nodes = 0 only (for empty directories, data_size implied as 0)
-
-**SOURCE CODE VERIFICATION**: This optimization is confirmed in NCBI VDB source code:
-- `pbstree-impl.c:PBSTreeImplSize()` returns `sizeof self->num_nodes` (4 bytes) when `num_nodes == 0`
-- `pbstree-priv.h:65` comments: "a node count - if zero, then the structure ends"
-- `pbstree-impl.c:PBSTreeImplCheckPersisted()` skips `data_size` validation when `num_nodes == 0`
 
 **Byte Order Handling:**
 - Files with byte order marker `0x05031988` (normal): Parse integers as little-endian
@@ -370,46 +326,6 @@ Each entry in `data_idx[]` contains an offset into the `data[]` section where th
 - The `PBSTreeForEach()` function walks the tree to build the directory structure
 - Directory entries contain nested PBSTree structures for their children
 
-**Individual TOC Entry Format in Data Section:**
-
-Based on the `KTocEntryInflateNodeCommon()` implementation, each entry in the PBSTree data section has this format:
-
-```c
-struct TOCEntryData {
-    uint16_t name_len;           // Length of entry name (little-endian or byte-swapped)
-    char name[name_len];         // Entry name (not null-terminated)
-    int64_t mtime;              // Unix timestamp (signed 64-bit)
-    uint32_t access_mode;        // Unix permissions
-    uint8_t type_code;           // Entry type (see KTocEntryType enum)
-
-    // Type-specific data follows:
-
-    // For ktocentrytype_dir (1):
-    // Nested PBSTree structure follows immediately
-
-    // For ktocentrytype_file (2):
-    uint64_t file_offset;        // Offset within archive where file data starts
-    uint64_t file_size;          // Size of file data
-
-
-    // For ktocentrytype_chunked (3):
-    uint64_t virtual_size;       // Total virtual file size
-    uint32_t chunk_count;        // Number of chunks
-    // For each chunk:
-    struct {
-        uint64_t logical_pos;    // Position in virtual file
-        uint64_t source_pos;     // Position in archive
-        uint64_t chunk_size;     // Size of this chunk
-    } chunks[chunk_count];
-
-    // For ktocentrytype_hardlink (5) or ktocentrytype_softlink (4):
-    uint16_t link_len;           // Length of link target
-    char link_target[link_len];  // Link target path (not null-terminated)
-
-    // For ktocentrytype_emptyfile (6):
-    // No additional data
-};
-```
 
 **Complete Parsing Algorithm:**
 1. Read SRA header to get file data offset and byte order flag
@@ -447,14 +363,13 @@ Offset  Size  Field       Description
 
 To parse PBSTree TOC data, implementers must:
 1. Read `num_nodes` as 32-bit little-endian value (or byte-swap if needed)
-2. **Empty Directory Check**: If `num_nodes = 0`, treat as optimized 4-byte header (no data_size field)
-3. **Non-empty Directories**: Read `data_size` and determine index array type:
+2. If `num_nodes == 0`, done. Otherwise, read `data_size` and determine index array type:
    - If `data_size ≤ 256`: Use 8-bit indices (`num_nodes` bytes)
    - If `data_size ≤ 65536`: Use 16-bit indices (`num_nodes × 2` bytes)
    - Otherwise: Use 32-bit indices (`num_nodes × 4` bytes)
-4. Parse entry data using indices as offsets into the data section
-5. Handle byte swapping for all multi-byte integers based on header byte order
-6. **Name Validation**: Reject any entries with name_len = 0 as invalid
+3. Parse entry data using indices as offsets into the data section
+4. Handle byte swapping for all multi-byte integers based on header byte order
+5. **Name Validation**: Reject any entries with name_len = 0 as invalid
 
 ### Concrete PBSTree Binary Format Example
 
@@ -962,190 +877,22 @@ data                  # type_code=2 (sequence data)
 idx                   # type_code=2 (sequence index)
 ```
 
-#### Path Reconstruction Algorithm for Real Files
+#### PBSTree Implementation Note
 
-**VDB Path Reconstruction:**
-
-VDB hierarchical paths are represented using nested PBSTree structures in directory entries. Real SRA files contain:
-
-- **Directory entries** (type_code=1): Contain nested PBSTree data for subdirectories
-- **File entries** (type_code=2): Point to actual data files with offset/size information
-- **Path traversal**: Navigate through nested directory structures using recursive PBSTree parsing
-
-**Common VDB directory structure patterns:**
-```
-md/cur          # Database metadata
-md5             # MD5 checksums
-tbl/SEQUENCE/   # Table definitions (contains nested PBSTree)
-  col/          # Column directory (contains nested PBSTree)
-    READ/       # Column data (contains nested PBSTree)
-      data      # Actual sequence data file
-      idx       # Index file for data access
-```
-
-#### VDB File Storage Pattern in Real Files
-
-**Discovery from Actual Implementation:**
-- VDB files are stored sequentially in the file data section
-- The order typically follows: all idx files first, then all data files
-- File offsets in TOC entries point to actual VDB file headers (starting with `88 19 03 05`)
-
-**VDB File Storage Organization:**
-
-Real SRA files store VDB data files in the archive's data section:
-- File offsets in TOC entries point to actual VDB file data
-- VDB files have their own internal structure (not documented here)
-- Files are stored with 4-byte alignment for efficient access
-- Index files (`idx`, `idx0`, `idx1`, `idx2`) provide access paths to data files
-
-#### Nested PBSTree Directory Traversal
-
-Directory entries in the TOC contain nested PBSTree structures:
-
-**Directory Traversal Implementation:**
-
-Directory entries contain nested PBSTree data immediately following their header. To traverse directories:
-
-1. **Parse directory entry** to get nested data size and location
-2. **Create nested PBSTree** from the embedded binary data
-3. **Search nested tree** for the desired entry by name
-4. **Parse child entries** recursively for further directory traversal
-
-**Directory Entry Format:**
-- Directory entries have `type_code = 1` (ktocentrytype_dir)
-- After the standard entry header, nested PBSTree data follows immediately
-- The nested PBSTree uses the same format as the root TOC structure
-
-#### Directory Structure Patterns
-
-**Standard VDB Database Layout in KAR TOC:**
-```
-/ (root)
-├── md/ (directory entry with nested PBSTree)
-│   ├── cur (file entry)
-│   ├── vers (file entry)
-│   └── root (file entry)
-├── tbl/ (directory entry with nested PBSTree)
-│   └── SEQUENCE/ (directory entry with nested PBSTree)
-│       ├── md/ (directory with table metadata)
-│       └── col/ (directory entry with nested PBSTree)
-│           ├── READ/ (directory entry with nested PBSTree)
-│           │   ├── data (file entry -> actual blob data)
-│           │   ├── idx (file entry -> index data)
-│           │   ├── idx1 (file entry -> level 1 index)
-│           │   └── idx2 (file entry -> level 2 index)
-│           └── QUALITY/ (directory entry with nested PBSTree)
-│               ├── data (file entry)
-│               └── idx (file entry)
-└── col/ (directory entry - global column definitions)
-    ├── READ/ (directory entry with nested PBSTree)
-    │   ├── data (file entry)
-    │   └── vers (file entry)
-    └── QUALITY/ (directory entry with nested PBSTree)
-        ├── data (file entry)
-        └── vers (file entry)
-```
-
-**Key Integration Points:**
-- **Directories**: Stored as `ktocentrytype_dir` with nested PBSTree data
-- **Files**: Stored as `ktocentrytype_file` with offset/size pointers
-- **Path separators**: Directory boundaries, not stored as literal '/' characters
-- **Navigation**: Each directory level requires separate PBSTree traversal
-
-### BSTree Navigation for TOC Access
-
-The TOC is organized as a persistent binary search tree for efficient access. Key operations:
-
-1. **Entry Search**: Use binary search through the sorted entry names
-2. **Tree Traversal**: Navigate left/right based on string comparison results
-3. **Byte Order Handling**: Apply byte swapping to all multi-byte integers when needed
-
-**Search Algorithm:**
-1. Start at root of PBSTree
-2. Compare target name with current entry name
-3. If match found: return entry data
-4. If target < current: search left subtree
-5. If target > current: search right subtree
-6. Repeat until found or exhausted
+**Important**: The name "Persisted Binary Search Tree" (PBSTree) refers to the in-memory data structure used by the NCBI implementation, not the serialized format in KAR files. In the KAR file, PBSTree data is stored as a flattened array with index offsets. The NCBI implementation reads this serialized data and constructs actual in-memory binary search trees (BSTree) for efficient directory lookups. Directory entries do contain nested PBSTree data, but this is only used during the parsing phase - runtime directory navigation uses the in-memory BSTree structures.
 
 ### TOC Parsing Algorithm
 
-**Complete TOC parsing with error checking:**
+**Parsing Implementation Notes:**
 
-```c
-typedef struct TOCEntry {
-    char* name;
-    uint64_t mod_time;
-    uint32_t access_mode;
-    uint8_t type_code;
-    uint64_t file_offset;
-    uint64_t file_size;
-} TOCEntry;
+Refer to the Python-ish pseudocode section for complete structure definitions. Key parsing steps:
 
-int parse_toc_entries(uint8_t* toc_data, size_t toc_size, TOCEntry** entries, int* count) {
-    uint8_t* current = toc_data;
-    uint8_t* toc_end = toc_data + toc_size;
-    *count = 0;
-
-    // First pass: count entries
-    while (current < toc_end) {
-        if (current + 2 > toc_end) return -1; // Buffer overrun
-
-        uint16_t name_len = read_uint16_le(current);
-        if (name_len == 0 || current + 2 + name_len > toc_end) return -1;
-
-        current += 2 + name_len + 8 + 4 + 1; // Skip name, mod_time, access_mode, type
-
-        if (current > toc_end) return -1; // Buffer overrun
-
-        uint8_t type = current[-1]; // Get type from previous byte
-        if (type == ktocentrytype_file || type == ktocentrytype_chunked) {
-            current += 16; // Skip file offset and size
-        } else if (type == ktocentrytype_softlink) {
-            if (current + 2 > toc_end) return -1;
-            uint16_t link_len = read_uint16_le(current);
-            current += 2 + link_len;
-        }
-
-        (*count)++;
-    }
-
-    // Second pass: extract entries
-    *entries = calloc(*count, sizeof(TOCEntry));
-    current = toc_data;
-
-    for (int i = 0; i < *count; i++) {
-        uint16_t name_len = read_uint16_le(current);
-        current += 2;
-
-        (*entries)[i].name = strndup((char*)current, name_len);
-        current += name_len;
-
-        (*entries)[i].mod_time = read_uint64_le(current);
-        current += 8;
-        (*entries)[i].access_mode = read_uint32_le(current);
-        current += 4;
-        (*entries)[i].type_code = *current++;
-
-        if ((*entries)[i].type_code == ktocentrytype_file) {
-            (*entries)[i].file_offset = read_uint64_le(current);
-            current += 8;
-            (*entries)[i].file_size = read_uint64_le(current);
-            current += 8;
-        }
-    }
-
-    return 0; // Success
-}
-```
-
-### TOC Tree Organization
-
-The TOC is organized as a **Persistent Binary Search Tree (PBSTree)** that provides:
-- **Efficient Lookup**: O(log n) access to any entry
-- **Ordered Traversal**: In-order traversal yields alphabetically sorted entries
-- **Compact Storage**: Binary tree structure minimizes metadata overhead
-- **Random Access**: Direct access to any subtree without full parsing
+1. **Header Validation**: Check magic signature, byte order, version
+2. **Empty Directory Check**: If `num_nodes = 0`, skip `data_size` field
+3. **Index Size Detection**: Choose uint8/uint16/uint32 based on `data_size` (if present)
+4. **Entry Parsing**: Parse each entry according to its `type_code`
+5. **Name Validation**: Reject entries with `name_len = 0`
+6. **Recursive Directory Parsing**: Handle nested PBSTree structures
 
 ## Chunked File Support
 
@@ -1155,13 +902,11 @@ For large files or files with non-contiguous storage requirements:
 
 ```c
 typedef struct KTocChunk {
-    uint64_t logical_offset;  // Offset within the logical file
-    uint64_t chunk_offset;    // Offset within the archive
-    uint64_t chunk_size;      // Size of this chunk
+    uint64_t logical_position;  // Position of chunk within logical file
+    uint64_t source_position;   // Position of chunk within source container file
+    uint64_t size;              // Size of this chunk
 } KTocChunk;
 ```
-
-**Note**: The exact KTocChunk structure definition varies across implementations. The above represents the logical structure based on usage patterns in the codebase.
 
 ### Chunked File Benefits
 - **Non-contiguous Storage**: Files can be stored in multiple segments
@@ -1218,7 +963,6 @@ Each file entry preserves:
 ### Timestamp Format
 
 **Timestamp Type**: `KTime_t` (64-bit signed integer)
-**Resolution**: Platform-dependent (typically nanosecond or microsecond)
 **Epoch**: Unix epoch (January 1, 1970, 00:00:00 UTC)
 
 ## Error Handling and Validation
