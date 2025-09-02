@@ -1049,7 +1049,7 @@ This design enables:
 ### Endianness
 - **Byte order**: Specified in header byte_order field
 - **Multi-byte values**: All follow header byte order specification
-- **String data**: Byte order not applicable (single-byte characters)
+- **String data**: UTF-8 encoded, byte order not applicable (UTF-8 is byte-order independent)
 
 ## Core Data Structures
 
